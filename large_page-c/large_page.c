@@ -32,6 +32,7 @@
 #include <regex.h>
 
 extern char __attribute__((weak))  __textsegment;
+extern char __start_lpstub;
 
 typedef struct {
   void*     from;
@@ -111,6 +112,9 @@ static map_status FindTextRegion(const char* lib_regex, mem_range* region) {
         result = (regexec(&regex, pathname, 0, NULL, 0) == 0);
       }
       if (result) {
+        uintptr_t lpstub_start = ((uintptr_t)(&__start_lpstub));
+        if (lpstub_start > start)
+          start = lpstub_start;
         region->from = (void*)start;
         region->to = (void*)end;
         CLEAN_EXIT(map_ok);
@@ -170,7 +174,7 @@ static map_status IsTransparentHugePagesEnabled(bool* result) {
 // c. madvise with MADV_HUGE_PAGE
 // d. If successful copy the code there and unmap the original region
 static map_status
-__attribute__((__section__(".lpstub")))
+__attribute__((__section__("lpstub")))
 __attribute__((__aligned__(HPS)))
 __attribute__((__noinline__))
 MoveRegionToLargePages(const mem_range* r) {
