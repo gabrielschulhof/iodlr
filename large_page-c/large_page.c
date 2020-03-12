@@ -33,6 +33,7 @@
 
 extern char __attribute__((weak))  __textsegment;
 extern char __start_lpstub;
+extern char __stop_lpstub;
 
 typedef struct {
   void*     from;
@@ -113,8 +114,23 @@ static map_status FindTextRegion(const char* lib_regex, mem_range* region) {
       }
       if (result) {
         uintptr_t lpstub_start = ((uintptr_t)(&__start_lpstub));
-        if (lpstub_start > start)
+        uintptr_t lpstub_stop = ((uintptr_t)(&__stop_lpstub));
+        // We handle two scenarios:
+        //
+        // 1. lpstub is located at the end of the mapping:
+        //    [start .....[lpstub_start]...[lpstub_stop]end]
+        //    \___________/ <-- desired range
+        //
+        // 2. lpstub is located at the beginning of the mapping:
+        //    [start[lpstub_start]...[lpstub_stop]...end]
+        //                     desired range --> \______/
+        if (lpstub_start > start) {
           start = lpstub_start;
+        }
+        else if (lpstub_stop < end) {
+          end = lpstub_stop;
+        }
+
         region->from = (void*)start;
         region->to = (void*)end;
         CLEAN_EXIT(map_ok);
@@ -278,12 +294,7 @@ static map_status AlignMoveRegionToLargePages(mem_range* r) {
     return status;
   }
 
-  if (r->from > (void*)MoveRegionToLargePages ||
-      r->to <= (void*)MoveRegionToLargePages) {
-    return MoveRegionToLargePages(r);
-  }
-
-  return map_mover_overlaps;
+  return MoveRegionToLargePages(r);
 }
 
 // Map the .text segment of the linked application into 2MB pages.
@@ -357,8 +368,6 @@ const char* MapStatusStr(map_status status, bool fulltext) {
       "malformed /proc/<PID>/maps file",
     "map_maps_open_failed",
       "failed to open maps file",
-    "map_mover_overlaps",
-      "the remapping function is part of the region",
     "map_null_regex",
       "regex was NULL",
     "map_region_not_found",
