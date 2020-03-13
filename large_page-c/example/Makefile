@@ -21,7 +21,7 @@ OBJFILES=              \
   filler16.o           \
 
 OBJS=$(addprefix $(OBJDIR)/,$(OBJFILES))
-LDFLAGS=-Wl,-T ../ld.implicit.script -Wl,-z,max-page-size=2097152
+LDFLAGS=-Wl,-z,max-page-size=2097152
 
 .PHONY: all
 all: large_page_example

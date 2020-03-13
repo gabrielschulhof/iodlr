@@ -33,7 +33,7 @@
 #include <linux/limits.h>
 #include <regex.h>
 
-extern char __attribute__((weak))  __textsegment;
+extern int main();
 extern char __start_lpstub;
 
 typedef struct {
@@ -112,7 +112,7 @@ static map_status FindTextRegion(const char* lib_regex, mem_range* region) {
     // reference symbol will let the iterator return the executable segment
     // containing the reference symbol rather than some other executable
     // segment.
-    find_params.ref_symbol = ((uintptr_t)(&__textsegment));
+    find_params.ref_symbol = ((uintptr_t)(main));
   } else {
     if (regcomp(&find_params.regex, lib_regex, 0) != 0) {
       return map_invalid_regex;
@@ -132,11 +132,6 @@ static map_status FindTextRegion(const char* lib_regex, mem_range* region) {
     // If we have no regex, we are dealing with the executable segment
     // containing the executable sections of the main executable itself.
     uintptr_t lpstub_start = ((uintptr_t)(&__start_lpstub));
-
-    // In the main executable the range that we find may contain more sections
-    // than just .text. Thus, we must use the reference symbol as the start of
-    // the range we wish to remap.
-    find_params.start = find_params.ref_symbol;
 
     // Since we are dealing with the main executable the range that we found may
     // also contain the `lpstub` section which contains the code responsible for
@@ -309,7 +304,7 @@ static map_status AlignMoveRegionToLargePages(mem_range* r) {
   }
 
   fprintf(stderr,
-          "Found %d pages\n",
+          "Found %lu pages\n",
           (((uintptr_t)r->to) - ((uintptr_t)r->from)) / HPS);
 
   return MoveRegionToLargePages(r);
