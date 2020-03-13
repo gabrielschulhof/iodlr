@@ -308,6 +308,10 @@ static map_status AlignMoveRegionToLargePages(mem_range* r) {
     return status;
   }
 
+  fprintf(stderr,
+          "Found %d pages\n",
+          (((uintptr_t)r->to) - ((uintptr_t)r->from)) / HPS);
+
   return MoveRegionToLargePages(r);
 }
 
