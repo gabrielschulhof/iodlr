@@ -28,6 +28,12 @@
 typedef enum {
   map_ok,
   map_failed_to_open_thp_file,
+  map_failed_to_stat_exe,
+  map_failed_to_open_exe,
+  map_failed_to_map_exe_see_errno,
+  map_failed_to_find_text_section,
+  map_failed_to_unmap_exe_see_errno,
+  map_failed_to_close_exe_see_errno,
   map_invalid_regex,
   map_invalid_region_address,
   map_malformed_thp_file,

@@ -23,6 +23,8 @@
 #define _GNU_SOURCE
 #include "large_page.h"
 #include <link.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -32,9 +34,6 @@
 #include <inttypes.h>
 #include <linux/limits.h>
 #include <regex.h>
-
-extern char __attribute__((weak))  __textsegment;
-extern char __start_lpstub;
 
 typedef struct {
   void*     from;
@@ -46,7 +45,6 @@ typedef struct {
   uintptr_t end;
   regex_t regex;
   bool have_regex;
-  uintptr_t start_symbol;
 } FindParams;
 
 #define HPS (2L * 1024 * 1024)
@@ -61,7 +59,14 @@ static inline uintptr_t largepage_align_up(uintptr_t addr) {
 }
 
 static int FindMapping(struct dl_phdr_info* hdr, size_t size, void* data) {
-  int idx;
+  int idx, fd, old_errno;
+  const char* filename;
+  struct stat st;
+  char* exe;
+  const char* strtab;
+  ElfW(Ehdr)* ehdr;
+  ElfW(Shdr)* shdr;
+  ElfW(Shdr)* shdr_text;
   FindParams* find_params = (FindParams*)data;
 
   // We are only interested in the information matching the regex or, if no
@@ -71,50 +76,80 @@ static int FindMapping(struct dl_phdr_info* hdr, size_t size, void* data) {
         regexec(&find_params->regex, hdr->dlpi_name, 0, NULL, 0) == 0) ||
       hdr->dlpi_name[0] == 0) {
 
-    // Once we have found the info structure for the desired linked-in object,
-    // we iterate over the mappings it lists to see if we can find the one that
-    // is executable that we are interested in.
-    for (idx = 0; idx < hdr->dlpi_phnum; idx++) {
-      const ElfW(Phdr)* phdr = &hdr->dlpi_phdr[idx];
+    filename = ((hdr->dlpi_name[0] == 0)
+        ? "/proc/self/exe"
+        : hdr->dlpi_name);
 
-      // This check identifies an executable mapping.
-      if (phdr->p_type == PT_LOAD && phdr->p_flags & PF_X) {
-        uintptr_t start = hdr->dlpi_addr + phdr->p_vaddr;
-        uintptr_t end = start + phdr->p_memsz;
+    if (stat(filename, &st) != 0) {
+      return -map_failed_to_stat_exe;
+    }
 
-        // If we were given a reference symbol, we perform an additional check
-        // to ensure that we return an executable mapping that contains the
-        // reference symbol because the linked-in object under scrutiny may have
-        // more than one executable mapping.
-        if (find_params->start_symbol != 0 &&
-            (find_params->start_symbol < start ||
-                find_params->start_symbol > end)) {
-          continue;
-        }
+    fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+      return -map_failed_to_open_exe;
+    }
 
-        find_params->start = start;
-        find_params->end = end;
-        return 1;
+    // Knowing the size of the file from stat(2) and with a file descriptor from
+    // open(2) we can now mmap(2) the executable.
+    exe = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (exe == MAP_FAILED) {
+      old_errno = errno;
+      close(fd);
+      errno = old_errno;
+      return -map_failed_to_map_exe_see_errno;
+    }
+
+    // We get the offsets to the string table storing the names of the sections.
+    ehdr = (ElfW(Ehdr)*)exe;
+    shdr = (ElfW(Shdr)*)(exe + ehdr->e_shoff);
+    shdr_text = NULL;
+    strtab = exe + shdr[ehdr->e_shstrndx].sh_offset;
+
+    // We look for the .text section headers.
+    for (idx = 0; idx < ehdr->e_shnum; idx++) {
+      if (!strncmp(strtab + shdr[idx].sh_name, ".text", 5)) {
+        shdr_text = &shdr[idx];
       }
     }
+
+    if (shdr_text == NULL) {
+      munmap(exe, st.st_size);
+      close(fd);
+      return -map_failed_to_find_text_section;
+    }
+
+    // If we found the .text section header we use the address specified therein
+    // along with the base address given in the program header info to calculate
+    // the current base address of the .text section, as well as the address of
+    // its end.
+    find_params->start = shdr_text->sh_addr + hdr->dlpi_addr;
+    find_params->end = find_params->start + shdr_text->sh_size;
+
+    // As part of the cleanup we unmap the executable.
+    if (munmap(exe, st.st_size) != 0) {
+      old_errno = errno;
+      close(fd);
+      errno = old_errno;
+      return map_failed_to_unmap_exe_see_errno;
+    }
+
+    // We close the executable file.
+    if (close(fd) == -1) {
+      return -map_failed_to_close_exe_see_errno;
+    }
+
+    return 1;
   }
 
-  return 0;
+  return -map_region_not_found;
 }
 
 // Identify and return the text region in the currently mapped memory regions.
 static map_status FindTextRegion(const char* lib_regex, mem_range* region) {
-  FindParams find_params = { 0, 0, { 0 }, false, 0 };
+  int status;
+  FindParams find_params = { 0, 0, { 0 }, false };
 
-  if (lib_regex == NULL) {
-    // If we have no regex it means that we wish to remap the .text segment of
-    // the main executable, so we must pass a reference symbol to the iterator
-    // in case the main executable has multiple executable segments. The
-    // reference symbol will let the iterator return the executable segment
-    // containing the reference symbol rather than some other executable
-    // segment.
-    find_params.start_symbol = ((uintptr_t)(&__textsegment));
-  } else {
+  if (lib_regex != NULL) {
     if (regcomp(&find_params.regex, lib_regex, 0) != 0) {
       return map_invalid_regex;
     }
@@ -124,30 +159,10 @@ static map_status FindTextRegion(const char* lib_regex, mem_range* region) {
   // We iterate over all the mappings created for the main executable and any of
   // its linked-in dependencies. The return value of `FindMapping` will become
   // the return value of `dl_iterate_phdr`.
-  if (dl_iterate_phdr(FindMapping, &find_params) == 0) {
+  status = dl_iterate_phdr(FindMapping, &find_params);
+  if ( status < 0) {
     regfree(&find_params.regex);
-    return map_region_not_found;
-  }
-
-  if (lib_regex == NULL) {
-    // If we have no regex, we are dealing with the executable segment
-    // containing the executable sections of the main executable itself.
-    uintptr_t lpstub_start = ((uintptr_t)(&__start_lpstub));
-
-    // In the main executable the range that we find may contain more sections
-    // than just .text. Thus, we must use the reference symbol as the start of
-    // the range we wish to remap.
-    find_params.start = find_params.start_symbol;
-
-    // Since we are dealing with the main executable the range that we found may
-    // also contain the `lpstub` section which contains the code responsible for
-    // performing the actual remapping. Since we do not want to remap that
-    // portion of the code, we must adjust the range to exclude the `lpstub`
-    // section. Here we make the assumption that the `lpstub` section is found
-    // after the `.text` section.
-    if (lpstub_start < find_params.end) {
-      find_params.end = lpstub_start;
-    }
+    return -status;
   }
 
   region->from = (void*)find_params.start;
@@ -205,7 +220,7 @@ static map_status IsTransparentHugePagesEnabled(bool* result) {
 // c. madvise with MADV_HUGE_PAGE
 // d. If successful copy the code there and unmap the original region
 static map_status
-__attribute__((__section__("lpstub")))
+__attribute__((__section__(".lpstub")))
 __attribute__((__aligned__(HPS)))
 __attribute__((__noinline__))
 MoveRegionToLargePages(const mem_range* r) {
@@ -302,6 +317,7 @@ static map_status CheckMemRange(mem_range* r) {
 // region to large pages.
 static map_status AlignMoveRegionToLargePages(mem_range* r) {
   map_status status;
+
   AlignRegionToPageBoundary(r);
 
   status = CheckMemRange(r);
@@ -371,6 +387,18 @@ const char* MapStatusStr(map_status status, bool fulltext) {
       "ok",
     "map_failed_to_open_thp_file",
       "failed to open thp enablement status file",
+    "map_failed_to_stat_exe",
+      "failed to stat executable",
+    "map_failed_to_open_exe",
+      "failed to open executable",
+    "map_failed_to_map_exe_see_errno",
+      "failed to map executable",
+    "map_failed_to_find_text_section",
+      "failed to find text section",
+    "map_failed_to_unmap_exe_see_errno",
+      "failed to unmap executable",
+    "map_failed_to_close_exe_see_errno",
+      "failed to close executable",
     "map_invalid_regex",
       "invalid regex",
     "map_invalid_region_address",
