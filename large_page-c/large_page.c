@@ -318,7 +318,18 @@ static map_status CheckMemRange(mem_range* r) {
 static map_status AlignMoveRegionToLargePages(mem_range* r) {
   map_status status;
 
+  fprintf(stderr,
+          "Found memory region %016lx - %016lx\n",
+          ((uintptr_t)r->from),
+          ((uintptr_t)r->to));
+
   AlignRegionToPageBoundary(r);
+
+  fprintf(stderr,
+          "Aligned to %016lx - %016lx (%d pages)\n",
+          ((uintptr_t)r->from),
+          ((uintptr_t)r->to),
+          (((uintptr_t)r->to) - ((uintptr_t)r->from)) / HPS);
 
   status = CheckMemRange(r);
   if (status != map_ok) {
